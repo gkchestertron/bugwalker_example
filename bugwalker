@@ -1,0 +1,134 @@
+#!/bin/bash
+
+# function to run test via ssh to VM
+function run_test {
+ssh -tt testapp "
+export TERM=dumb 
+echo Fixing Memcache... 
+sudo service memcached restart 
+# (scrubbed) cd to app folder
+echo Building... 
+# (scrubbed) run build script
+cd /var/www/secure/casper-v2 
+./casperate /var/www/secure/casper-v2/tests/bugwalker.js $1 # runs the script that spins up casper/phantom
+exit
+"
+return $?
+}
+
+# failed to provide good/bad revisions
+if [ $# -lt 2 ]; then
+clear
+cat << EOF 
+
+Fail: Please provide a bad revision hash and a good revision hash (or HEAD~n). i.e.:
+
+$ ./bugwalk [good revision] [bad revision]
+
+To get a list of commits try:
+
+$ git log --pretty=format:'%C(auto)%h %s %Cblue<%cn> %Cgreen%cr%Creset' --quiet
+
+Then copy the hashes of one known good commit and one known bad commit 
+(or just HEAD). Note: type 'q' to exit the git log browser.
+
+Bugwalk will do a binary search between these limits based on the output of tests/bugwalker.js.
+Modify this script for your bug. A passing test suite will will make the tested 
+revision the new good limit, and a failing test suite will make it the new bad limit.
+The offending commit will be the last failure output in the bugwalk summary.
+
+EOF
+exit
+fi
+
+# uncommitted changes in working tree
+changed=`git diff-index --name-only HEAD --`
+if [ ! -z "$changed" ]; then
+    echo -e "\nFail: You have uncommitted changes. Please Stash or commit before running this script.\n"
+    exit
+fi
+
+# get numeric limits/middle from git hashes
+good=`git log $1..HEAD --pretty=oneline | wc -l`
+bad=`git log $2..HEAD --pretty=oneline | wc -l`
+mid=$[($good + $bad) / 2]
+offending=$bad
+message="Bugwalk Summary:"
+
+# cherry pick for compatibility of older revision
+phantom_fixes=#hash for cherry-picking commit that fixes compatibility issues with phantomjs
+phantom_fixes_count=`git log $phantom_fixes..HEAD --pretty=oneline | wc -l`
+
+# expand range by one to make binary search include the given revisions
+if [ $good -gt $bad ]; then
+    good=$[ $good + 1 ]
+    bad=$[ $bad - 1 ]
+else
+    bad=$[ $bad + 1 ]
+    good=$[ $good - 1 ]
+fi
+
+# create copy of current branch
+git branch -D bugwalk-$1-$2 > /dev/null
+git checkout -b bugwalk-$1-$2 > /dev/null
+
+clear
+
+# do binary search
+while [ $[$good - $bad] -lt -1 -o $[$good - $bad] -gt 1 ]
+do
+    revision=`git rev-parse HEAD~$mid`
+    pretty_revision=`git show --pretty=format:'%C(auto)%H %s %Cblue%cn %Cgreen%cr%Creset' --quiet $revision`
+    head=`git rev-parse HEAD`
+    git checkout $revision  -q > /dev/null
+
+    # cherry pick if older than fixes for phantom compatibility
+    if [ $mid -gt $phantom_fixes_count ]; then
+        git cherry-pick $phantom_fixes --allow-empty > /dev/null
+    fi
+    git checkout $head -- . > /dev/null # include latest version of testing framework
+    echo Switched to: $pretty_revision
+    run_test $revision
+    result=$?
+
+    # build message based on test shell output
+    if [ $result -eq 0 ]; then
+        message="$message\nPASS - Revision $pretty_revision"
+        good=$mid
+    else
+        message="$message\nFAIL - Revision $pretty_revision"
+        bad=$mid
+        offending=$pretty_revision
+    fi
+
+    # return to copy branch
+    git checkout - -q > /dev/null
+    mid=$[($good + $bad) / 2]
+done
+
+message="$message\n\nThe offending revision was: $offending\n"
+
+clear 
+
+echo -e $message
+
+cat << EOF
+You are now on a copy of your branch, checked out to the last commit tested - 
+with some files cherry picked to make the application compatible with the testing
+framework. Don't forget to checkout your branch before continuing your work.
+
+Note: that if all tested revisions passed or all failed (or if the issue is intermittent in the revision history, the results of the bugwalker may be innacurate.
+
+If something has gone wrong with git in this process (like being unable to 
+apply the cherry picks), don't panic. Try the following commands:
+$ git checkout .; $ git reset --hard HEAD; $ git clean -f
+
+If that still doesn't work:
+$ git add-A; git reset --hard HEAD
+
+Then checkout your previous branch, and go on your merry way.  To see your branches and current git status:
+$ clear; git branch -vv; git status
+
+To delete the newly created bugwalk branch:
+$ git branch -D [bugwalk-[good]-[bad]
+EOF

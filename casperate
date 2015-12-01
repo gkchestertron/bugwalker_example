@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# paths to node, casperjs and phantomjs
+: ${NODE_JS_BIN:="path to node"}
+: ${CASPER_JS_BIN:="path to casperjs"}
+: ${PHANTOM_JS_BIN:="path to phantomjs"}
+
+# delete old screenshots
+rm /var/www/secure/casper-v2/screenshots/*.png
+
+clear
+
+# default to smokeScreen.js if no test file is given
+if [ $# -lt 1 ]; then
+    filepath=/var/www/secure/casper-v2/tests/smokeScreen.js
+else
+    filepath=$1
+fi
+
+# put node, casper, and phantom in the path
+export PATH="$NODE_JS_BIN:$CASPER_JS_BIN:$SLIMER_JS_BIN:$PHANTOM_JS_BIN:$PATH"
+
+# run the test with a bunch of options
+# add any new classes/instances to the includes param
+casperjs test $filepath \
+    --includes=" \
+        settings/config.js, \
+        settings/casper.js, \
+        classes/menu.js,    \
+        classes/user.js,    \
+        instances/menu.js,  \
+        instances/users.js  \
+        " \
+    --config=settings/phantom.js          \
+    --log-level=debug                     \
+    --ssl-protocol=any                    \
+    --local-storage-path=./html5-storage/ \
+    --revision=$2                         \
+    --value=true
+
+exit $?
